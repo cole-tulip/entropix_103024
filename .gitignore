@@ -13,6 +13,7 @@ weights/
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # C extensions
 *.so
@@ -115,6 +116,7 @@ celerybeat.pid
 # Environments
 .iw-env
 .env
+*.env
 .venv
 env/
 venv/

@@ -26,6 +26,7 @@ def rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6) -> torch.Tenso
   return w * (x * torch.rsqrt(torch.pow(x, 2).mean(-1, keepdim=True) + eps))
 
 def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor, dtype: torch.dtype = torch.float32) -> Tuple[torch.Tensor, torch.Tensor]:
+    input_dtype = xq.dtype # Get the input dtype
     reshape_xq = xq.float().reshape(*xq.shape[:-1], -1, 2)
     reshape_xk = xk.float().reshape(*xk.shape[:-1], -1, 2)
     xq_ = torch.complex(reshape_xq[..., 0], reshape_xq[..., 1])
@@ -34,7 +35,7 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
     xk_out = xk_ * freqs_cis.unsqueeze(0).unsqueeze(2)
     xq_out = torch.stack((xq_out.real, xq_out.imag), dim=-1).reshape(*xq_out.shape[:-1], -1)
     xk_out = torch.stack((xk_out.real, xk_out.imag), dim=-1).reshape(*xk_out.shape[:-1], -1)
-    return xq_out.to(dtype), xk_out.to(dtype)
+    return xq_out.to(input_dtype), xk_out.to(input_dtype)
 
 def attention(x: torch.Tensor, layer_weights: LayerWeights, model_params, cur_pos: int, layer_idx: int, freqs_cis: torch.Tensor, kvcache: KVCache, attn_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, KVCache, torch.Tensor]:
     bsz, _, _ = x.shape

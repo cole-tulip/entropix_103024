@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import torch
 import jax.numpy as jnp
 import ml_dtypes
@@ -7,6 +8,8 @@ from transformers import AutoModelForCausalLM
 from transformers.dynamic_module_utils import get_imports
 from unittest.mock import patch
 import huggingface_hub
+
+load_dotenv(dotenv_path=Path(__file__).parent / '.env')
 
 # Constants
 MODEL_ID = 'meta-llama/Llama-3.2-1B-Instruct'

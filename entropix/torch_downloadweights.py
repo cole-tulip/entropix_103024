@@ -8,11 +8,28 @@ from transformers import AutoModelForCausalLM
 from transformers.dynamic_module_utils import get_imports
 from unittest.mock import patch
 import huggingface_hub
+from typing import Optional
 
-load_dotenv(dotenv_path=Path(__file__).parent / '.env')
+load_dotenv(dotenv_path=Path(__file__).parent.parent / '.env')
 
-# Constants
-MODEL_ID = 'meta-llama/Llama-3.2-1B-Instruct'
+# Model configurations
+MODEL_CONFIGS = {
+    '1b': {
+        'model_id': 'meta-llama/Llama-3.2-1B-Instruct',
+        'n_heads': 32,
+        'n_kv_heads': 8,
+        'dim': 2048,
+        'out_dir': 'weights/1B-Instruct'
+    },
+    '70b': {
+        'model_id': 'nvidia/Llama-3.1-Nemotron-70B-Instruct-HF',
+        'n_heads': 64,
+        'n_kv_heads': 8,
+        'dim': 8192,
+        'out_dir': 'weights/70B-Instruct'
+    }
+}
+
 TOKEN = os.getenv('HUGGINGFACE_TOKEN')
 if not TOKEN:
     raise ValueError('HUGGINGFACE_TOKEN environment variable is not set.')
@@ -58,9 +75,19 @@ def translate_key(in_key: str):
         print(f"Don't know how to handle {in_key=}")
     return f'{out_key}.weight'
 
-def reverse_permute(tensor: torch.Tensor, n_heads: int = 32, dim1: int = 4096, dim2: int = 4096) -> torch.Tensor:
+def reverse_permute(tensor: torch.Tensor, n_heads: int, dim1: int, dim2: int, is_key: bool = False, n_kv_heads: int = None) -> torch.Tensor:
     """Reverse permute the attention weights."""
-    return tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+    if is_key:
+        if n_kv_heads is None:
+            raise ValueError("n_kv_heads must be provided for key weights")
+        
+        # For key weights, keep original shape but transpose correctly
+        # Input shape is [n_kv_heads * head_dim, dim2]
+        kv_head_dim = tensor.shape[0] // n_kv_heads  # This gives us correct head_dim
+        return tensor.view(n_kv_heads, kv_head_dim, dim2).transpose(1, 2).reshape(tensor.shape[0], dim2)
+    else:
+        # Original permutation for query weights
+        return tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
 
 def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
     """Work around for HuggingFace import issue."""
@@ -71,49 +98,60 @@ def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
         imports.remove("flash_attn")
     return imports
 
-def download_weights(model_id: str = MODEL_ID, out_dir: Path = Path('weights/1B-Instruct')):
+def download_weights(model_size: str = '1b'):
     """Download and convert weights from HuggingFace to the required format."""
+    if model_size.lower() not in MODEL_CONFIGS:
+        raise ValueError(f"Model size {model_size} not supported. Choose from: {list(MODEL_CONFIGS.keys())}")
+    
+    config = MODEL_CONFIGS[model_size.lower()]
+    out_dir = Path(config['out_dir'])
+    model_id = config['model_id']
+    
     if not out_dir.exists():
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Downloading model from {model_id}...")
+    print(f"Downloading model {model_id} to {out_dir}...")
     with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+        # For 70B model, use device_map='auto' to handle memory
+        device_map = 'auto' if model_size.lower() == '70b' else None
+        
         hf_model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
             offload_folder="/tmp/offload",
+            device_map=device_map,
             token=TOKEN
         )
         
         print("Converting weights...")
-        with torch.no_grad():
-            state_dict = hf_model.state_dict()
-            for hf_name, param in state_dict.items():
-                print(f' {hf_name}: {param.shape=}')
-                name = translate_key(hf_name)
-                if name.endswith('wq.weight'):
-                    param = reverse_permute(param, n_heads=32, dim1=2048, dim2=2048)  # 1B
-                    #param = reverse_permute(param, n_heads=24, dim1=3072, dim2=3072)  # 3B
-                    #param = reverse_permute(param, n_heads=32, dim1=4096, dim2=4096)  # 7B
-                    #param = reverse_permute(param, n_heads=64, dim1=8192, dim2=8192)   # 70B
-                    #param = reverse_permute(param, n_heads=96, dim1=12288, dim2=12288)   # 123B
-                    #param = reverse_permute(param, n_heads=128, dim1=16384, dim2=16384) # 405B
-                    #param = reverse_permute(param, n_heads=128, dim1=12288, dim2=12288) # DSV2
-                    #param = reverse_permute(param, n_heads=64, dim1=12288, dim2=12288) # Commandr+
-                    #param = reverse_permute(param, n_heads=48, dim1=6144, dim2=6144)    # Mixtral8x22B
-                elif name.endswith('wk.weight'): #wk.weight
-                    param = reverse_permute(param, n_heads=8, dim1=512, dim2=2048)  # 1B
-                    #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=3072)  # 3B
-                    #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=4096)  # 7B
-                    #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=8192)   # 70B
-                    #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=12288)   # 123B
-                    #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=16384)  # 405B
-                    #param = reverse_permute(param, n_heads=128, dim1=12288, dim2=12288)  # DSV2
-                #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=12288)  # Commandr+
-                #param = reverse_permute(param, n_heads=8, dim1=1024, dim2=6144)    # Mixtral8x22B
-                else:
-                    pass
-                bf16_np_out = param.cpu().view(dtype=torch.uint16).numpy().view(ml_dtypes.bfloat16)
+    with torch.no_grad():
+        state_dict = hf_model.state_dict()
+        for hf_name, param in state_dict.items():
+            print(f' {hf_name}: {param.shape=}')
+            name = translate_key(hf_name)
+            if name.endswith('wq.weight'):
+                param = reverse_permute(
+                    param, 
+                    n_heads=config['n_heads'],
+                    dim1=config['dim'],
+                    dim2=config['dim']
+                )
+            elif name.endswith('wk.weight'):
+                print(f"Processing key weight with shape {param.shape}")
+                param = reverse_permute(
+                    param, 
+                    n_heads=config['n_heads'],
+                    dim1=config['dim'],
+                    dim2=config['dim'],
+                    is_key=True,
+                    n_kv_heads=config['n_kv_heads']
+                )
+                print(f"After permute: {param.shape}")
+                
+                # Move parameter to CPU if it's on GPU
+                param = param.cpu() if param.device.type != 'cpu' else param
+                
+                bf16_np_out = param.view(dtype=torch.uint16).numpy().view(ml_dtypes.bfloat16)
                 bf16_out = jnp.asarray(bf16_np_out, dtype=jnp.bfloat16).reshape(*param.shape)
                 save_path = out_dir / f'{name}.npy'
                 print(f'Writing {hf_name} as {name} to {save_path}')
@@ -122,15 +160,23 @@ def download_weights(model_id: str = MODEL_ID, out_dir: Path = Path('weights/1B-
     print(f"Successfully downloaded and converted weights to {out_dir}")
 
 if __name__ == "__main__":
-    import argparse
+    import tyro
+    from dataclasses import dataclass
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_id", type=str, default=MODEL_ID, help="HuggingFace model ID")
-    parser.add_argument("--token", type=str, help="HuggingFace token")
-    parser.add_argument("--out_dir", type=str, default="weights/1B-Instruct", help="Output directory")
-    args = parser.parse_args()
+    @dataclass
+    class Args:
+        model_size: str = "1B"  # Match the main.py convention
+        weights_dir: Optional[Path] = None
     
-    if args.token:
-        TOKEN = args.token
+    args = tyro.cli(Args)
     
-    download_weights(args.model_id, Path(args.out_dir))
+    # Convert model size to lowercase for dict lookup
+    model_size = args.model_size.lower()
+    if model_size not in MODEL_CONFIGS:
+        raise ValueError(f"Model size {args.model_size} not supported. Choose from: {list(MODEL_CONFIGS.keys())}")
+    
+    # If weights_dir is provided, override the default
+    if args.weights_dir:
+        MODEL_CONFIGS[model_size]['out_dir'] = str(args.weights_dir)
+    
+    download_weights(model_size=model_size)

@@ -2,7 +2,7 @@ git-describe.txt
 .vscode/
 attic/
 weights/
-
+*.pem
 
 # boilerplate from here on down
 

@@ -80,13 +80,8 @@ def reverse_permute(tensor: torch.Tensor, n_heads: int, dim1: int, dim2: int, is
     if is_key:
         if n_kv_heads is None:
             raise ValueError("n_kv_heads must be provided for key weights")
-        
-        # For key weights, keep original shape but transpose correctly
-        # Input shape is [n_kv_heads * head_dim, dim2]
-        kv_head_dim = tensor.shape[0] // n_kv_heads  # This gives us correct head_dim
-        return tensor.view(n_kv_heads, kv_head_dim, dim2).transpose(1, 2).reshape(tensor.shape[0], dim2)
+        return tensor
     else:
-        # Original permutation for query weights
         return tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
 
 def fixed_get_imports(filename: str | os.PathLike) -> list[str]:
@@ -129,6 +124,27 @@ def download_weights(model_size: str = '1b'):
         for hf_name, param in state_dict.items():
             print(f' {hf_name}: {param.shape=}')
             name = translate_key(hf_name)
+            
+            # Handle both key and value weights for GQA
+            if model_size.lower() == '70b' and ('wk.weight' in name or 'wv.weight' in name):
+                print(f"Processing {'key' if 'wk' in name else 'value'} weight with shape {param.shape}")
+                param = reverse_permute(
+                    param, 
+                    n_heads=config['n_heads'],
+                    dim1=config['dim'],
+                    dim2=config['dim'],
+                    is_key=True,  # Treat both k and v weights the same way for GQA
+                    n_kv_heads=config['n_kv_heads']
+                )
+                print(f"After permute: {param.shape}")
+            elif name.endswith('wq.weight'):
+                param = reverse_permute(
+                    param, 
+                    n_heads=config['n_heads'],
+                    dim1=config['dim'],
+                    dim2=config['dim']
+                )
+            
             if name.endswith('wq.weight'):
                 param = reverse_permute(
                     param, 
@@ -148,14 +164,14 @@ def download_weights(model_size: str = '1b'):
                 )
                 print(f"After permute: {param.shape}")
                 
-                # Move parameter to CPU if it's on GPU
-                param = param.cpu() if param.device.type != 'cpu' else param
+            # Move parameter to CPU if it's on GPU
+            param = param.cpu() if param.device.type != 'cpu' else param
                 
-                bf16_np_out = param.view(dtype=torch.uint16).numpy().view(ml_dtypes.bfloat16)
-                bf16_out = jnp.asarray(bf16_np_out, dtype=jnp.bfloat16).reshape(*param.shape)
-                save_path = out_dir / f'{name}.npy'
-                print(f'Writing {hf_name} as {name} to {save_path}')
-                jnp.save(str(save_path), bf16_out)
+            bf16_np_out = param.view(dtype=torch.uint16).numpy().view(ml_dtypes.bfloat16)
+            bf16_out = jnp.asarray(bf16_np_out, dtype=jnp.bfloat16).reshape(*param.shape)
+            save_path = out_dir / f'{name}.npy'
+            print(f'Writing {hf_name} as {name} to {save_path}')
+            jnp.save(str(save_path), bf16_out)
 
     print(f"Successfully downloaded and converted weights to {out_dir}")
 

@@ -32,10 +32,11 @@ params_70b = {
 class DistributedConfig(NamedTuple):
     world_size: int = 8  # Number of GPUs
     tensor_parallel_size: int = 8  # Default to using all GPUs
-    pipeline_parallel_size: int = 1  # Start with just tensor parallelism
-    enable_cuda_graph: bool = True
-    use_deepspeed: bool = True
     activation_checkpointing: bool = True
+
+    @property
+    def is_distributed(self) -> bool:
+        return self.world_size > 1 and self.tensor_parallel_size > 1
 
 class ModelParams(NamedTuple):
     n_layers: int
@@ -47,6 +48,11 @@ class ModelParams(NamedTuple):
     use_scaled_rope: bool
     distributed: DistributedConfig = DistributedConfig()
 
+    @property
+    def is_parallelized(self) -> bool:
+        """Helper to check if model should use tensor parallelism"""
+        return self.distributed.is_distributed
+
 # Updated parameter configs
 LLAMA_1B_PARAMS = ModelParams(
     n_layers=params_1b["n_layers"],
@@ -56,7 +62,7 @@ LLAMA_1B_PARAMS = ModelParams(
     max_seq_len=params_1b["max_seq_len"],
     rope_theta=params_1b["rope_theta"],
     use_scaled_rope=params_1b["use_scaled_rope"],
-    distributed=DistributedConfig(tensor_parallel_size=1)  # No distribution for 1B
+    distributed=DistributedConfig(tensor_parallel_size=1, world_size=1)  # No distribution for 1B
 )
 
 LLAMA_70B_PARAMS = ModelParams(

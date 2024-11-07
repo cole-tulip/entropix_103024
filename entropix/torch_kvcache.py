@@ -1,18 +1,8 @@
 import torch
 import torch.nn as nn
 
-# Device selection, tree is like first apple silicion, then cuda, fallback is cpu.
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
-
-#print(f"Using device: {device}")
-
 class KVCache(nn.Module):
-    def __init__(self, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int):
+    def __init__(self, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int, device: torch.device):
         super(KVCache, self).__init__()
         # Initialize k and v as buffers to ensure they're part of the module state
         self.register_buffer(
@@ -33,9 +23,9 @@ class KVCache(nn.Module):
         )
 
     @classmethod
-    def new(cls, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int) -> 'KVCache':
+    def new(cls, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int, device: torch.device) -> 'KVCache':
         """Creates a new KVCache instance with initialized k and v tensors."""
-        return cls(layers, bsz, max_seq_len, kv_heads, head_dim)
+        return cls(layers, bsz, max_seq_len, kv_heads, head_dim, device)
 
     def update(
         self,

@@ -1,13 +1,26 @@
-from typing import NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional, Tuple, List
 import os
 import torch
 import torch.distributed as dist
-import deepspeed
-import accelerate
+import logging
 import tyro
 import math
+import datetime
 from pathlib import Path
 from functools import partial
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
 
 from entropix.config import get_model_params
 from entropix.tokenizer import Tokenizer
@@ -17,26 +30,62 @@ from entropix.torch_weights import load_weights
 from entropix.torch_sampler import sample
 from entropix.prompts import create_prompts_from_csv, prompt
 
-# Device selection logic preserved
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
+def setup_inference(model_params):
+    """Setup distributed inference with proper process groups"""
+    print(f"[Setup] distributed config: {model_params.distributed}")
+    print(f"[Setup] is_distributed: {model_params.distributed.is_distributed}")
+    
+    if not model_params.distributed.is_distributed:
+        print("[Setup] Taking non-distributed path")
+        return 0, torch.device("cuda"), None, None
+        
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    print(f"[Setup] local_rank: {local_rank}")
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    
+    # Initialize process groups
+    dist.init_process_group("nccl")
+    world_size = dist.get_world_size()
+    print(f"[Setup] world_size: {world_size}")
+    
+    if world_size != model_params.distributed.world_size:
+        print(f"World size mismatch: {world_size} vs {model_params.distributed.world_size}")
+        cleanup_distributed()
+        raise ValueError("World size mismatch")
+    
+    # Create process groups
+    ranks = list(range(world_size))
+    attn_group = dist.new_group(ranks=ranks)
+    ffn_group = dist.new_group(ranks=ranks)
+    print(f"[Setup] Created process groups")
+    
+    return local_rank, device, attn_group, ffn_group
 
-print(f"Using device: {device}")
+def cleanup_distributed():
+    """Cleanup distributed training resources"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
-torch.set_float32_matmul_precision('high')
+def get_device_and_setup():
+    """Unified device selection logic"""
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    
+    torch.set_float32_matmul_precision('high')
+    return device
 
 def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
-    """Preserved scaling function"""
+    """Preserved scaling function - no changes needed"""
     SCALE_FACTOR = 8.0
     LOW_FREQ_FACTOR = 1.0
     HIGH_FREQ_FACTOR = 4.0
     OLD_CONTEXT_LEN = 8192
 
-    # Original scaling logic preserved
     low_freq_wavelen = OLD_CONTEXT_LEN / LOW_FREQ_FACTOR
     high_freq_wavelen = OLD_CONTEXT_LEN / HIGH_FREQ_FACTOR
 
@@ -59,8 +108,8 @@ def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
     scaled_freqs = torch.vmap(scale_freq)(freqs)
     return scaled_freqs
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 500000.0, use_scaled: bool = False, dtype: torch.dtype = torch.float32) -> torch.Tensor:
-    """Preserved frequency computation"""
+def precompute_freqs_cis(dim: int, end: int, theta: float = 500000.0, use_scaled: bool = False, dtype: torch.dtype = torch.float32, device: torch.device = None) -> torch.Tensor:
+    """Preserved frequency computation with device parameter"""
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=dtype, device=device)[: (dim // 2)] / dim))
     if use_scaled:
         freqs = apply_scaling(freqs)
@@ -70,77 +119,88 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 500000.0, use_scaled
     freqs = t * freqs
     return torch.exp(1j * freqs)
 
-def build_attn_mask(seqlen: int, start_pos: int) -> torch.Tensor:
-    """Preserved attention mask building"""
+def build_attn_mask(seqlen: int, start_pos: int, device: torch.device) -> torch.Tensor:
+    """Preserved attention mask building with device parameter"""
     mask = None
     if seqlen > 1:
-        mask = torch.full((seqlen, seqlen), float("-inf"))
+        mask = torch.full((seqlen, seqlen), float("-inf"), device=device)
         mask = torch.triu(mask, diagonal=1)
-        mask = torch.hstack([torch.zeros((seqlen, start_pos)), mask]).to(torch.float32).to(device)
+        mask = torch.hstack([torch.zeros((seqlen, start_pos), device=device), mask])
     return mask
-
-def setup_distributed(model_params):
-    """Initialize distributed training when needed"""
-    if model_params.distributed.use_deepspeed:
-        deepspeed.init_distributed(
-            dist_backend="nccl",
-            auto_mpi_discovery=True,
-            init_method="env://"
-        )
-    else:
-        dist.init_process_group(backend="nccl")
-    
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
 
 def main(
     model_size: str = "1B",
     prompts_file: Optional[str] = None,
     weights_dir: Optional[Path] = None,
-    local_rank: int = 0,  # Added this
 ):
+    """Main execution function"""
     model_params = get_model_params(model_size)
+    local_rank, device, attn_group, ffn_group = setup_inference(model_params)
     
-    # Original distributed setup logic preserved
-    if model_size == "70B":
-        setup_distributed(model_params)  # Keep this existing function
-    
-    # Original device selection logic preserved
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+    try:
+        with torch.inference_mode():
+            xfmr_weights = load_weights(
+                ckpt_dir=weights_dir,
+                n_layers=model_params.n_layers,
+                distributed=model_params.distributed if model_size == "70B" else None,
+                local_rank=local_rank if model_size == "70B" else None,
+                device=device
+            )
 
-    print(f"Using device: {device}")
-
-    with torch.inference_mode():
-        xfmr_weights = load_weights(
-            ckpt_dir=weights_dir,
-            n_layers=model_params.n_layers,
-            distributed=model_params.distributed if model_size == "70B" else None,
-            local_rank=local_rank if model_size == "70B" else None  # Add this parameter
-        )
-
-        tokenizer = Tokenizer('entropix/tokenizer.model')
-        
-        def generate(xfmr_weights, model_params, tokens):
-            """Preserved generate function"""
-            # ... rest of generate function remains exactly the same ...
-
-        # Handle prompts exactly as before
-        if prompts_file:
-            prompts = create_prompts_from_csv(prompts_file)
-            for i, prompt_text in enumerate(prompts):
-                print(f"\nProcessing prompt {i+1}/{len(prompts)}")
-                print("Prompt:", prompt_text[:100], "...")
-                tokens = tokenizer.encode(prompt_text, bos=True, eos=False, allowed_special='all')
-                generate(xfmr_weights, model_params, tokens)
-        else:
-            # Use default prompt
-            tokens = tokenizer.encode(prompt, bos=True, eos=False, allowed_special='all')
-            generate(xfmr_weights, model_params, tokens)
+            tokenizer = Tokenizer('entropix/tokenizer.model')
             
+            def generate(xfmr_weights, model_params, tokens: List[int], process_groups=None):
+                tokens = torch.tensor([tokens], device=device)
+                bsz = tokens.shape[0]
+                seqlen = tokens.shape[1]
+                
+                # Initialize KV cache
+                kv_cache = KVCache.new(
+                    layers=model_params.n_layers,
+                    bsz=bsz,
+                    max_seq_len=model_params.max_seq_len,
+                    kv_heads=model_params.n_local_kv_heads,
+                    head_dim=model_params.head_dim, 
+                    device=device
+                )
+
+                # Precompute position embeddings
+                freqs_cis = precompute_freqs_cis(
+                    dim=model_params.head_dim,
+                    end=model_params.max_seq_len,
+                    theta=model_params.rope_theta,
+                    use_scaled=model_params.use_scaled_rope,
+                    device=device
+                )
+
+                # Build attention mask
+                attn_mask = build_attn_mask(seqlen=seqlen, start_pos=0, device=device)
+
+                # Main generation loop / forward pass
+                logits, kv_cache, attention_scores, attn_stats = xfmr(
+                    xfmr_weights=xfmr_weights,
+                    model_params=model_params,
+                    tokens=tokens,
+                    cur_pos=0,
+                    freqs_cis=freqs_cis,
+                    kvcache=kv_cache,
+                    process_groups=process_groups,  # Pass process_groups directly
+                    attn_mask=attn_mask
+                )
+                
+                next_token = sample(
+                    gen_tokens=tokens,
+                    logits=logits,
+                    attention_scores=attention_scores
+                )
+                
+                tokens = torch.cat([tokens, next_token], dim=1)
+                print(tokenizer.decode(tokens[0].tolist()))
+                return tokens
+    finally:
+        # Clean up distributed resources
+        if model_params.distributed.is_distributed:
+            cleanup_distributed()
+
 if __name__ == '__main__':
     tyro.cli(main)

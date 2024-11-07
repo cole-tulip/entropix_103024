@@ -2,25 +2,31 @@
 name = "entropix"
 version = "0.1.0"
 description = ""
-authors = ['xjdr']
+authors = ["_xjdr","Cole-Tulip"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
-jax = {version = "^0.4.33", extras = ["cuda12"], markers = "platform_system != 'Darwin'"}
-jaxlib = {version = "^0.4.33", extras = ["cpu"], markers = "platform_system == 'Darwin'"}
-flax = "^0.9.0"
+python = ">=3.11,<3.12"
+numpy = ">=2.1.0"
+ml-dtypes = "0.5.0"
+jaxlib = "0.4.34"
+jax = "0.4.35"
+flax = "0.9.0"
+chex = "0.1.87"
+torch = "2.1.2+cu118"
+transformers = "4.46.2"
+accelerate = "0.26.1"
+optax = "*"
+tensorstore = "*"
+orbax-checkpoint = "*"
+blobfile = "3.0.0"
+tyro = "0.8.14"
+pydantic = "2.9.2"
+pytest = "8.3.3"
+ruff = "0.6.9"
 tiktoken = "0.4.0"
-pydantic = "^2.9.2"
-blobfile = "^3.0.0"
-ml-dtypes = "^0.5.0"
-rich = "^13.8.1"
-torch = {version = "^2.4.1", source = "pytorch"}
-chex = "^0.1.87"
-tyro = "^0.8.11"
-deepspeed = "^0.12.3"
-accelerate = "^0.26.0"
-
+rich = "13.9.4"
+huggingface-hub = "0.25.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.2"
@@ -31,7 +37,7 @@ huggingface-hub = {extras = ["cli"], version = "^0.25.1"}
 
 [[tool.poetry.source]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu124"
+url = "https://download.pytorch.org/whl/cu118"
 priority = "explicit"
 
 [build-system]

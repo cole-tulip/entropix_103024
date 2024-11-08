@@ -1,10 +1,21 @@
 import torch
 import torch.nn as nn
+import logging
+
+logger = logging.getLogger(__name__)
 
 class KVCache(nn.Module):
-    def __init__(self, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int, device: torch.device):
+    def __init__(
+        self,
+        layers: int,
+        bsz: int,
+        max_seq_len: int,
+        kv_heads: int,
+        head_dim: int,
+        device: torch.device
+    ):
         super(KVCache, self).__init__()
-        # Initialize k and v as buffers to ensure they're part of the module state
+        # Initialize k and v buffers with shapes optimized for GQA (8 KV heads)
         self.register_buffer(
             'k',
             torch.zeros(
@@ -21,10 +32,19 @@ class KVCache(nn.Module):
                 device=device
             )
         )
+        self.max_seq_len = max_seq_len
 
     @classmethod
-    def new(cls, layers: int, bsz: int, max_seq_len: int, kv_heads: int, head_dim: int, device: torch.device) -> 'KVCache':
-        """Creates a new KVCache instance with initialized k and v tensors."""
+    def new(
+        cls,
+        layers: int,
+        bsz: int,
+        max_seq_len: int,
+        kv_heads: int,
+        head_dim: int,
+        device: torch.device
+    ) -> 'KVCache':
+        """Creates a new KVCache instance."""
         return cls(layers, bsz, max_seq_len, kv_heads, head_dim, device)
 
     def update(
@@ -36,41 +56,39 @@ class KVCache(nn.Module):
         n_rep: int
     ):
         """
-        Updates the cache with new key and value tensors.
-
+        Updates cache with new key/value tensors, handling GQA pattern.
+        
         Args:
-            xk (torch.Tensor): New key tensor to insert. Shape should align with (bsz, insert_len, kv_heads, head_dim).
-            xv (torch.Tensor): New value tensor to insert. Shape should align with (bsz, insert_len, kv_heads, head_dim).
-            layer_idx (int): The index of the layer to update.
-            cur_pos (int): The current position in the sequence to start inserting.
-            n_rep (int): The number of times to repeat the keys and values along the sequence dimension.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]:
-                - keys: Updated or repeated keys tensor.
-                - values: Updated or repeated values tensor.
+            xk: New key tensor (bsz, seqlen, n_kv_heads, head_dim)
+            xv: New value tensor (bsz, seqlen, n_kv_heads, head_dim)  
+            layer_idx: Layer index
+            cur_pos: Current sequence position
+            n_rep: Number of times to repeat KV heads (typically 8 for 64q/8kv)
         """
-        # Ensure xk and xv have the correct device and dtype
+        if cur_pos >= self.max_seq_len:
+            return None, None, self
+
+        # Convert to cache dtype
         xk = xk.to(self.k.dtype)
         xv = xv.to(self.v.dtype)
 
-        # Update the k and v tensors in the specified layer and position
-        insert_len = xk.size(1)  # Assuming xk shape is (bsz, insert_len, kv_heads, head_dim)
-        self.k[layer_idx, :, cur_pos:cur_pos+insert_len, :, :] = xk
-        self.v[layer_idx, :, cur_pos:cur_pos+insert_len, :, :] = xv
+        # Update cache at current position
+        insert_len = xk.size(1)
+        self.k[layer_idx, :, cur_pos:cur_pos+insert_len] = xk
+        self.v[layer_idx, :, cur_pos:cur_pos+insert_len] = xv
 
         if cur_pos == 0:
-            # If inserting at the beginning, repeat the new keys and values
+            # Initial position: repeat new KV tensors for GQA pattern
             keys = xk.repeat_interleave(n_rep, dim=2)
             values = xv.repeat_interleave(n_rep, dim=2)
         else:
-            # Otherwise, repeat the existing keys and values from the cache
+            # Use cached keys/values and repeat for GQA
             keys = self.k[layer_idx].repeat_interleave(n_rep, dim=2)
             values = self.v[layer_idx].repeat_interleave(n_rep, dim=2)
 
         return keys, values, self
 
     def clear(self):
-        """Resets the k and v caches to zeros."""
+        """Resets the KV cache."""
         self.k.zero_()
         self.v.zero_()
